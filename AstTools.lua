@@ -39,6 +39,26 @@ local function AstLoad(pmAstPath)
     return ast_table
 end
 
+local function AstGetBlockWithTextNameList(pmAstObj)
+    local block_name_list = {}
+
+    local ast_block_cur_name = "block_00000"
+    local ast_block_cur = pmAstObj["ast"][ast_block_cur_name]
+    while true do
+        if ast_block_cur.text then
+            table.insert(block_name_list, ast_block_cur_name)
+        elseif ast_block_cur.select then
+            table.insert(block_name_list, ast_block_cur_name)
+        end
+        -- check next block
+        ast_block_cur_name = ast_block_cur["linknext"]
+        ast_block_cur = pmAstObj["ast"][ast_block_cur_name]
+        if ast_block_cur == nil then break end
+    end
+
+    return block_name_list
+end
+
 local function AstTextExport(pmAstPath, pmLang)
     local function ExportText(pmTextTable)
         local msg_str = ''
@@ -56,20 +76,20 @@ local function AstTextExport(pmAstPath, pmLang)
             elseif type(info) == 'table' then -- process ctrl
                 if info[1] == 'txruby' then
                     if info.text then
-                        msg_str = msg_str .. '[rb=' .. info.text .. ']('
+                        msg_str = msg_str .. '[txruby=' .. info.text .. ']'
                     else
                         if #info ~= 1 then assert(false) end
-                        msg_str = msg_str .. ')'
+                        msg_str = msg_str .. '[@txruby]'
                     end
                 elseif info[1] == 'rt2' then
                     if #info ~= 1 then assert(false) end
                     msg_str = msg_str .. '[r]'
                 elseif info[1] == 'exfont' then
                     if info.size then
-                        msg_str = msg_str .. '[ef=' .. info.size .. ']('
+                        msg_str = msg_str .. '[exfont=' .. info.size .. ']'
                     else
                         if #info ~= 1 then assert(false) end
-                        msg_str = msg_str .. ')'
+                        msg_str = msg_str .. '[@exfont]'
                     end
                 else
                     assert(false)
@@ -106,27 +126,19 @@ local function AstTextExport(pmAstPath, pmLang)
 
     pmLang = pmLang or 'ja'
 
-    local export_text_table = {}
-    local export_text_seq_table = {}
+    local texts_list = {}
 
     local ast_obj = AstLoad(pmAstPath)
-    local ast_block_cur_name = "block_00000"
-    local ast_block_cur = ast_obj["ast"][ast_block_cur_name]
-    while true do
-        if ast_block_cur.text then -- process msg
-            table.insert(export_text_seq_table, ast_block_cur_name)
-            table.insert(export_text_table, { ["msg"] = ExportText(ast_block_cur.text) })
+    for _, ast_block_name_cur in pairs(AstGetBlockWithTextNameList(ast_obj)) do
+        local ast_block_cur = ast_obj["ast"][ast_block_name_cur]
+        if ast_block_cur.text then       -- process msg
+            table.insert(texts_list, { ["msg"] = ExportText(ast_block_cur.text) })
         elseif ast_block_cur.select then -- process select
-            table.insert(export_text_seq_table, ast_block_cur_name)
-            table.insert(export_text_table, { ["sel"] = ExportSelect(ast_block_cur.select) })
+            table.insert(texts_list, { ["sel"] = ExportSelect(ast_block_cur.select) })
         end
-        -- check next block
-        ast_block_cur_name = ast_block_cur["linknext"]
-        ast_block_cur = ast_obj["ast"][ast_block_cur_name]
-        if ast_block_cur == nil then break end
     end
 
-    return export_text_table, export_text_seq_table
+    return texts_list
 end
 
 local function AstTextImprot(pmAstPath, pmJsonPath, pmLang)
@@ -135,28 +147,37 @@ local function AstTextImprot(pmAstPath, pmJsonPath, pmLang)
             local trans_msg_info = { ["name"] = pmTransNameTable }
 
             local sub_str_beg = 1
-            for cur_seq = 1, #pmTraStr do
-                if pmTraStr:byte(cur_seq) ~= string.byte('[') then goto continue end
+            local cur_seq = 1
+            while cur_seq < #pmTraStr do
+                if pmTraStr:byte(cur_seq) ~= string.byte('[') then
+                    cur_seq = cur_seq + 1
+                    goto continue
+                end
 
                 table.insert(trans_msg_info, pmTraStr:sub(sub_str_beg, cur_seq - 1))
 
-                local bracket_end_seq = pmTraStr:find(']', cur_seq + 1)
-                if bracket_end_seq == nil then assert(false) end
-                local token = pmTraStr:sub(cur_seq, bracket_end_seq)
+                local token_end_seq = pmTraStr:find(']', cur_seq + 1)
+                if token_end_seq == nil then assert(false) end
+                local token = pmTraStr:sub(cur_seq, token_end_seq)
 
                 if token == '[r]' then
                     table.insert(trans_msg_info, { "ret2" })
-                    cur_seq = bracket_end_seq + 1;
-                elseif token:sub(1, 4) == '[rb=' then
-                    table.insert(trans_msg_info, { "txruby", text = token:sub(4, #token - 1) })
-                    if pmTraStr:byte(bracket_end_seq + 1) ~= string.byte('(') then assert(false) end
-                    local rb_target_end = pmTraStr:find(')', bracket_end_seq + 1)
-                    if rb_target_end == nil then assert(false) end
-                    table.insert(trans_msg_info, pmTraStr:sub(bracket_end_seq + 2, rb_target_end - 1))
+                    cur_seq = token_end_seq + 1;
+                elseif token:sub(1, 8) == '[txruby=' then
+                    table.insert(trans_msg_info, { "txruby", text = token:sub(9, #token - 1) })
+                    local token_pair_end_seq = pmTraStr:find('[@txruby]', token_end_seq + 1)
+                    if token_pair_end_seq == nil then assert(false) end
+                    table.insert(trans_msg_info, pmTraStr:sub(token_end_seq + 1, token_pair_end_seq - 2))
                     table.insert(trans_msg_info, { "txruby" })
-                    cur_seq = rb_target_end + 1
+                    cur_seq = token_pair_end_seq + #'[@txruby]' - 1
+                elseif token:sub(1, 8) == '[exfont=' then
+                    table.insert(trans_msg_info, { "exfont", size = token:sub(9, #token - 1) })
+                    local token_pair_end_seq = pmTraStr:find('[@exfont]', token_end_seq + 1)
+                    if token_pair_end_seq == nil then assert(false) end
+                    table.insert(trans_msg_info, pmTraStr:sub(token_end_seq + 1, token_pair_end_seq - 2))
+                    table.insert(trans_msg_info, { "exfont" })
+                    cur_seq = token_pair_end_seq + #"[@exfont]" - 1
                 else
-                    -- unknown token
                     assert(false)
                 end
 
@@ -165,6 +186,7 @@ local function AstTextImprot(pmAstPath, pmJsonPath, pmLang)
                 ::continue::
             end
 
+            if sub_str_beg ~= cur_seq then assert(false) end
             return trans_msg_info
         end
 
@@ -205,12 +227,11 @@ local function AstTextImprot(pmAstPath, pmJsonPath, pmLang)
 
     pmLang = pmLang or 'ja'
 
-    local _, text_block_seq_table = AstTextExport(pmAstPath, pmLang)
-
     local ast_obj = AstLoad(pmAstPath)
-    local info_obj = InfoJsonLoad(pmJsonPath, #text_block_seq_table)
-    for index = 1, #text_block_seq_table do
-        local ast_cur = ast_obj["ast"][text_block_seq_table[index]]
+    local block_name_list = AstGetBlockWithTextNameList(ast_obj)
+    local info_obj = InfoJsonLoad(pmJsonPath, #block_name_list)
+    for index = 1, #block_name_list do
+        local ast_cur = ast_obj["ast"][block_name_list[index]]
         local info_cur = info_obj[index];
 
         if ast_cur["text"] then -- process test
@@ -282,12 +303,12 @@ local function AstBatchCompress(pmAstFolder, pmSaveFolder)
 end
 
 
-
 return {
     Dump = AstDump,
     BatchCompress = AstBatchCompress,
     BatchTextExport = AstBatchTextExport,
     BatchTextImport = AstBatchTextImport,
+    TextExport = AstTextExport,
     TextImport = AstTextImprot,
     Load = AstLoad,
 }
